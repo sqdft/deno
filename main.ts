@@ -1,6 +1,5 @@
-// main.ts - Deno Grok代理服务
+// main.ts - Deno Grok代理服务 (修复版)
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
-import { serveDir } from "https://deno.land/std@0.208.0/http/file_server.ts";
 
 interface AccountConfig {
   cookies: string;
@@ -41,6 +40,48 @@ function handleCORS(request: Request): Response | null {
   return null;
 }
 
+// 测试账号连接
+async function testAccount(accountId: string): Promise<{ success: boolean; message: string }> {
+  try {
+    const account = ACCOUNTS[accountId];
+    if (!account || !account.cookies) {
+      return { 
+        success: false, 
+        message: `Account ${accountId} not configured or missing cookies` 
+      };
+    }
+
+    const testUrl = "https://grok.x.ai/";
+    
+    const response = await fetch(testUrl, {
+      method: "HEAD",
+      headers: {
+        "Cookie": account.cookies,
+        "User-Agent": account.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+      },
+      redirect: "manual",
+    });
+
+    if (response.status === 200 || response.status === 302) {
+      return { success: true, message: "Connection test successful" };
+    } else if (response.status === 401 || response.status === 403) {
+      return { success: false, message: "Authentication failed - cookies may be invalid" };
+    } else {
+      return { success: false, message: `HTTP ${response.status}` };
+    }
+  } catch (error) {
+    return { 
+      success: false, 
+      message: `Connection failed: ${error.message}` 
+    };
+  }
+}
+
 // 代理Grok请求
 async function proxyGrokRequest(request: Request, accountId: string): Promise<Response> {
   try {
@@ -56,7 +97,13 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
     }
 
     const url = new URL(request.url);
-    const targetPath = url.searchParams.get("path") || "";
+    let targetPath = url.searchParams.get("path") || "/";
+    
+    // 确保路径以 / 开头
+    if (!targetPath.startsWith("/")) {
+      targetPath = "/" + targetPath;
+    }
+    
     const grokUrl = `https://grok.x.ai${targetPath}`;
 
     console.log(`Proxying request to: ${grokUrl} for account: ${accountId}`);
@@ -65,7 +112,7 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
     const headers: HeadersInit = {
       "Cookie": account.cookies,
       "User-Agent": account.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+      "Accept": request.headers.get("Accept") || "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.5",
       "Accept-Encoding": "gzip, deflate, br",
       "DNT": "1",
@@ -89,16 +136,8 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
       method: request.method,
       headers,
       body,
-      redirect: "manual", // 手动处理重定向
+      redirect: "follow", // 自动处理重定向
     });
-
-    // 处理重定向
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("Location");
-      if (location) {
-        return Response.redirect(location, response.status);
-      }
-    }
 
     // 获取响应内容
     let responseBody = await response.arrayBuffer();
@@ -108,30 +147,40 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
     if (contentType.includes("text/html")) {
       let htmlContent = new TextDecoder().decode(responseBody);
       
+      // 获取当前主机名
+      const currentHost = new URL(request.url).origin;
+      
       // 替换页面中的链接，让它们通过代理
       htmlContent = htmlContent
-        .replace(/href="\/([^"]+)"/g, `href="/proxy?account=${accountId}&path=/$1"`)
-        .replace(/src="\/([^"]+)"/g, `src="/proxy?account=${accountId}&path=/$1"`)
-        .replace(/url\(\/([^)]+)\)/g, `url(/proxy?account=${accountId}&path=/$1)`)
-        // 添加一些自定义样式来标识当前账号
+        // 替换相对路径的链接
+        .replace(/href="\/([^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/$1"`)
+        .replace(/src="\/([^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/$1"`)
+        .replace(/action="\/([^"]*?)"/g, `action="${currentHost}/proxy?account=${accountId}&path=/$1"`)
+        // 替换CSS中的相对路径
+        .replace(/url\(\/([^)]+)\)/g, `url(${currentHost}/proxy?account=${accountId}&path=/$1)`)
+        .replace(/url\("\/([^"]+)"\)/g, `url("${currentHost}/proxy?account=${accountId}&path=/$1")`)
+        .replace(/url\('\/([^']+)'\)/g, `url('${currentHost}/proxy?account=${accountId}&path=/$1')`)
+        // 添加账号标识
         .replace(
           "<head>",
           `<head>
           <style>
-            body::before {
-              content: "Account: ${accountId}";
-              position: fixed;
-              top: 10px;
-              right: 10px;
-              background: rgba(29, 155, 240, 0.8);
-              color: white;
-              padding: 4px 8px;
-              border-radius: 4px;
-              font-size: 12px;
-              z-index: 9999;
-              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            .proxy-account-indicator {
+              position: fixed !important;
+              top: 10px !important;
+              right: 10px !important;
+              background: rgba(29, 155, 240, 0.9) !important;
+              color: white !important;
+              padding: 6px 12px !important;
+              border-radius: 6px !important;
+              font-size: 12px !important;
+              z-index: 999999 !important;
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+              font-weight: 500 !important;
+              box-shadow: 0 2px 8px rgba(0,0,0,0.2) !important;
             }
-          </style>`
+          </style>
+          <div class="proxy-account-indicator">🤖 ${accountId.toUpperCase()}</div>`
         );
       
       responseBody = new TextEncoder().encode(htmlContent).buffer;
@@ -142,8 +191,8 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
     
     // 复制重要的响应头
     const headersToKeep = [
-      "Content-Type", "Content-Length", "Set-Cookie", 
-      "Cache-Control", "Expires", "Last-Modified", "ETag"
+      "Content-Type", "Cache-Control", "Expires", 
+      "Last-Modified", "ETag", "Content-Encoding"
     ];
     
     headersToKeep.forEach(headerName => {
@@ -152,6 +201,9 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
         responseHeaders.set(headerName, headerValue);
       }
     });
+
+    // 设置正确的 Content-Length
+    responseHeaders.set("Content-Length", responseBody.byteLength.toString());
 
     return new Response(responseBody, {
       status: response.status,
@@ -172,6 +224,57 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
         headers: { ...corsHeaders, "Content-Type": "application/json" } 
       }
     );
+  }
+}
+
+// 静态文件服务
+async function serveStaticFile(pathname: string): Promise<Response> {
+  try {
+    // 默认服务 index.html
+    if (pathname === "/" || pathname === "") {
+      pathname = "/index.html";
+    }
+    
+    // 安全检查：防止目录遍历
+    if (pathname.includes("..")) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    
+    // 尝试从 public 目录读取文件
+    const filePath = `./public${pathname}`;
+    
+    try {
+      const fileContent = await Deno.readFile(filePath);
+      
+      // 确定内容类型
+      let contentType = "text/plain";
+      if (pathname.endsWith(".html")) contentType = "text/html";
+      else if (pathname.endsWith(".css")) contentType = "text/css";
+      else if (pathname.endsWith(".js")) contentType = "application/javascript";
+      else if (pathname.endsWith(".json")) contentType = "application/json";
+      else if (pathname.endsWith(".png")) contentType = "image/png";
+      else if (pathname.endsWith(".jpg") || pathname.endsWith(".jpeg")) contentType = "image/jpeg";
+      else if (pathname.endsWith(".gif")) contentType = "image/gif";
+      else if (pathname.endsWith(".svg")) contentType = "image/svg+xml";
+      
+      return new Response(fileContent, {
+        headers: {
+          ...corsHeaders,
+          "Content-Type": contentType,
+          "Cache-Control": "public, max-age=3600",
+        },
+      });
+    } catch {
+      return new Response("File not found", { 
+        status: 404,
+        headers: corsHeaders,
+      });
+    }
+  } catch (error) {
+    return new Response("Server error", { 
+      status: 500,
+      headers: corsHeaders,
+    });
   }
 }
 
@@ -215,6 +318,17 @@ async function handler(request: Request): Promise<Response> {
         );
 
       default:
+        // 检查是否是测试账号的请求
+        const testMatch = apiPath.match(/^\/test\/(.+)$/);
+        if (testMatch) {
+          const accountId = testMatch[1];
+          const testResult = await testAccount(accountId);
+          return new Response(
+            JSON.stringify(testResult),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        
         return new Response(
           JSON.stringify({ error: "API endpoint not found" }),
           { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -234,16 +348,12 @@ async function handler(request: Request): Promise<Response> {
     if (ACCOUNTS[accountId]) {
       // 重定向到Grok主页，通过代理
       const grokMainUrl = `/proxy?account=${accountId}&path=/`;
-      return Response.redirect(grokMainUrl, 302);
+      return Response.redirect(new URL(grokMainUrl, request.url).href, 302);
     }
   }
 
-  // 静态文件服务 - 服务前端文件
-  return await serveDir(request, {
-    fsRoot: "./public",
-    urlRoot: "",
-    enableCors: true,
-  });
+  // 静态文件服务
+  return await serveStaticFile(pathname);
 }
 
 // 启动服务器
