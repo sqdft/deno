@@ -545,188 +545,169 @@ deno run --allow-net --allow-read --allow-env main.ts
     <div class="notification" id="notification"></div>
 
     <script>
-// 修复后的前端JavaScript代码
-// 将这段代码替换到您的 index.html 中的 <script> 标签内容
+        let accountsData = [];
 
-    let accountsData = [];
+        // 显示通知
+        function showNotification(message, type = 'success') {
+            const notification = document.getElementById('notification');
+            notification.textContent = message;
+            notification.className = `notification ${type}`;
+            notification.classList.add('show');
+            
+            setTimeout(() => {
+                notification.classList.remove('show');
+            }, 3000);
+        }
 
-// 显示通知
-function showNotification(message, type = 'success') {
-    const notification = document.getElementById('notification');
-    notification.textContent = message;
-    notification.className = `notification ${type}`;
-    notification.classList.add('show');
-    
-    setTimeout(() => {
-        notification.classList.remove('show');
-    }, 3000);
-}
+        // 显示加载遮罩
+        function showLoading() {
+            document.getElementById('loadingOverlay').classList.add('show');
+        }
 
-// 显示加载遮罩
-function showLoading() {
-    document.getElementById('loadingOverlay').classList.add('show');
-}
+        // 隐藏加载遮罩
+        function hideLoading() {
+            document.getElementById('loadingOverlay').classList.remove('show');
+        }
 
-// 隐藏加载遮罩
-function hideLoading() {
-    document.getElementById('loadingOverlay').classList.remove('show');
-}
+        // 切换主题
+        function toggleTheme() {
+            document.body.classList.toggle('light');
+            const themeToggle = document.querySelector('.theme-toggle');
+            themeToggle.textContent = document.body.classList.contains('light') ? '🌞' : '🌙';
+            localStorage.setItem('theme', document.body.classList.contains('light') ? 'light' : 'dark');
+        }
 
-// 切换主题
-function toggleTheme() {
-    document.body.classList.toggle('light');
-    const themeToggle = document.querySelector('.theme-toggle');
-    themeToggle.textContent = document.body.classList.contains('light') ? '🌞' : '🌙';
-    localStorage.setItem('theme', document.body.classList.contains('light') ? 'light' : 'dark');
-}
-
-// 检查服务健康状态
-async function checkHealth() {
-    const statusDot = document.getElementById('statusDot');
-    const statusText = document.getElementById('statusText');
-    const accountCount = document.getElementById('accountCount');
-    
-    statusDot.className = 'status-dot loading';
-    statusText.textContent = '检查服务状态中...';
-    
-    try {
-        const response = await fetch('/api/health', {
-            headers: {
-                'Accept': 'application/json'
+        // 检查服务健康状态
+        async function checkHealth() {
+            const statusDot = document.getElementById('statusDot');
+            const statusText = document.getElementById('statusText');
+            const accountCount = document.getElementById('accountCount');
+            
+            statusDot.className = 'status-dot loading';
+            statusText.textContent = '检查服务状态中...';
+            
+            try {
+                const response = await fetch('/api/health', {
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                if (data.status === 'ok') {
+                    statusDot.className = 'status-dot';
+                    statusText.textContent = '服务运行正常';
+                    
+                    const configuredCount = Object.values(data.accounts).filter(acc => acc.configured).length;
+                    accountCount.textContent = `账号: ${configuredCount}/3`;
+                    
+                    // 更新账号数据
+                    accountsData = Object.entries(data.accounts).map(([id, config]) => ({
+                        id,
+                        configured: config.configured,
+                        name: `账号${id.replace('account', '')}`,
+                        description: config.configured ? '已配置，可以使用' : '未配置cookies'
+                    }));
+                    
+                    renderAccounts();
+                } else {
+                    throw new Error('Service not healthy');
+                }
+            } catch (error) {
+                statusDot.className = 'status-dot error';
+                statusText.textContent = '服务连接失败';
+                accountCount.textContent = '账号: 0/3';
+                showNotification(`无法连接到服务: ${error.message}`, 'error');
             }
-        });
-        
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
         }
-        
-        const data = await response.json();
-        
-        if (data.status === 'ok') {
-            statusDot.className = 'status-dot';
-            statusText.textContent = '服务运行正常';
+
+        // 渲染账号卡片
+        function renderAccounts() {
+            const grid = document.getElementById('accountsGrid');
+            grid.innerHTML = '';
             
-            const configuredCount = Object.values(data.accounts).filter(acc => acc.configured).length;
-            accountCount.textContent = `账号: ${configuredCount}/3`;
-            
-            // 更新账号数据
-            accountsData = Object.entries(data.accounts).map(([id, config]) => ({
-                id,
-                configured: config.configured,
-                name: `账号${id.replace('account', '')}`,
-                description: config.configured ? '已配置，可以使用' : '未配置cookies'
-            }));
-            
-            renderAccounts();
-        } else {
-            throw new Error('Service not healthy');
+            accountsData.forEach(account => {
+                const card = document.createElement('div');
+                card.className = 'account-card';
+                card.innerHTML = `
+                    <div class="account-header">
+                        <h3 class="account-title">${account.name}</h3>
+                        <span class="account-status ${account.configured ? 'ready' : 'not-configured'}">
+                            ${account.configured ? '✅ 就绪' : '❌ 未配置'}
+                        </span>
+                    </div>
+                    <p class="account-description">${account.description}</p>
+                    <div class="account-actions">
+                        <a href="/proxy?account=${account.id}&path=/" 
+                           class="btn btn-primary" 
+                           target="_blank"
+                           ${!account.configured ? 'style="pointer-events: none; opacity: 0.5;"' : ''}
+                           onclick="trackAccountClick('${account.id}')">
+                            🚀 启动 ${account.name}
+                        </a>
+                        <button class="btn btn-secondary" 
+                                onclick="testAccount('${account.id}')"
+                                ${!account.configured ? 'disabled' : ''}>
+                            🧪 测试连接
+                        </button>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
         }
-    } catch (error) {
-        statusDot.className = 'status-dot error';
-        statusText.textContent = '服务连接失败';
-        accountCount.textContent = '账号: 0/3';
-        showNotification(`无法连接到服务: ${error.message}`, 'error');
-    }
-}
 
-// 渲染账号卡片
-function renderAccounts() {
-    const grid = document.getElementById('accountsGrid');
-    grid.innerHTML = '';
-    
-    accountsData.forEach(account => {
-        const card = document.createElement('div');
-        card.className = 'account-card';
-        card.innerHTML = `
-            <div class="account-header">
-                <h3 class="account-title">${account.name}</h3>
-                <span class="account-status ${account.configured ? 'ready' : 'not-configured'}">
-                    ${account.configured ? '✅ 就绪' : '❌ 未配置'}
-                </span>
-            </div>
-            <p class="account-description">${account.description}</p>
-            <div class="account-actions">
-                <a href="/proxy?account=${account.id}&path=/" 
-                   class="btn btn-primary" 
-                   target="_blank"
-                   ${!account.configured ? 'style="pointer-events: none; opacity: 0.5;"' : ''}
-                   onclick="trackAccountClick('${account.id}')">
-                    🚀 启动 ${account.name}
-                </a>
-                <button class="btn btn-secondary" 
-                        onclick="testAccount('${account.id}')"
-                        ${!account.configured ? 'disabled' : ''}>
-                    🧪 测试连接
-                </button>
-            </div>
-        `;
-        grid.appendChild(card);
-    });
-}
-
-// 测试账号连接 - 修复版本
-async function testAccount(accountId) {
-    showLoading();
-    
-    try {
-        // 使用新的API端点进行测试
-        const response = await fetch(`/api/test/${accountId}`, {
-            method: 'GET',
-            headers: {
-                'Accept': 'application/json'
+        // 测试账号连接
+        async function testAccount(accountId) {
+            showLoading();
+            
+            try {
+                const response = await fetch(`/api/test/${accountId}`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                hideLoading();
+                
+                if (result.success) {
+                    showNotification(`${accountId} 连接测试成功！`, 'success');
+                } else {
+                    showNotification(`${accountId} 连接测试失败: ${result.message}`, 'error');
+                }
+            } catch (error) {
+                hideLoading();
+                showNotification(`${accountId} 连接测试失败: ${error.message}`, 'error');
             }
-        });
-        
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
         }
-        
-        const result = await response.json();
-        
-        hideLoading();
-        
-        if (result.success) {
-            showNotification(`${accountId} 连接测试成功！`, 'success');
-        } else {
-            showNotification(`${accountId} 连接测试失败: ${result.message}`, 'error');
+
+        // 跟踪账号点击
+        function trackAccountClick(accountId) {
+            console.log(`Account clicked: ${accountId}`);
         }
-    } catch (error) {
-        hideLoading();
-        showNotification(`${accountId} 连接测试失败: ${error.message}`, 'error');
-    }
-}
 
-// 跟踪账号点击
-function trackAccountClick(accountId) {
-    // 这里可以添加分析代码，例如发送到后端或第三方分析服务
-    console.log(`Account clicked: ${accountId}`);
-}
-
-// 初始化主题
-function initTheme() {
-    const savedTheme = localStorage.getItem('theme');
-    if (savedTheme === 'light') {
-        document.body.classList.add('light');
-        document.querySelector('.theme-toggle').textContent = '🌞';
-    }
-}
-
-// 页面加载时初始化
-document.addEventListener('DOMContentLoaded', () => {
-    initTheme();
-    checkHealth();
-    
-    // 定时检查服务状态（每分钟）
-    setInterval(checkHealth, 60000);
-    
-    // 添加键盘快捷键支持
-    document.addEventListener('keydown', (event) => {
-        if (event.key === 't' && event.ctrlKey) {
-            event.preventDefault();
-            toggleTheme();
+        // 初始化主题
+        function initTheme() {
+            const savedTheme = localStorage.getItem('theme');
+            if (savedTheme === 'light') {
+                document.body.classList.add('light');
+                document.querySelector('.theme-toggle').textContent = '🌞';
+            }
         }
-    });
-});
+
+        // 页面加载时初始化
+        document.addEventListener('DOMContentLoaded', () => {
             initTheme();
             checkHealth();
             
@@ -736,6 +717,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // 添加键盘快捷键支持
             document.addEventListener('keydown', (event) => {
                 if (event.key === 't' && event.ctrlKey) {
+                    event.preventDefault();
                     toggleTheme();
                 }
             });
