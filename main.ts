@@ -8,6 +8,9 @@ interface AccountConfig {
 
 // 验证 cookies 格式
 function validateCookies(cookies: string): string {
+  if (!cookies) {
+    throw new Error("Cookies are empty or undefined");
+  }
   const cleanedCookies = cookies
     .replace(/\n/g, '') // 移除换行符
     .replace(/\r/g, '') // 移除回车符
@@ -16,17 +19,18 @@ function validateCookies(cookies: string): string {
   if (!cleanedCookies.match(/^[^;]+(;\s*[^;]+)*$/)) {
     throw new Error("Invalid cookies format");
   }
+  if (!cleanedCookies.includes("cf_clearance") || !cleanedCookies.includes("sso=")) {
+    throw new Error("Missing required cookies (cf_clearance or sso)");
+  }
   return cleanedCookies;
 }
 
-// 账号配置 - 仅保留 account1
+// 账号配置 - 仅保留 account1，依赖环境变量
 const ACCOUNTS: Record<string, AccountConfig> = {
   account1: {
     cookies: (() => {
       try {
-        return validateCookies(
-          Deno.env.get("ACCOUNT1_COOKIES") || ""
-        );
+        return validateCookies(Deno.env.get("ACCOUNT1_COOKIES") || "");
       } catch (error) {
         console.error("Invalid cookies for account1:", error.message);
         return "";
@@ -55,7 +59,7 @@ function handleCORS(request: Request): Response | null {
 }
 
 // 测试账号连接
-async function testAccount(accountId: string): Promise<{ success: boolean; message: string }> {
+async function testAccount(accountId: string): Promise<{ success: boolean; message: string; location?: string }> {
   try {
     const account = ACCOUNTS[accountId];
     if (!account || !account.cookies) {
@@ -78,20 +82,32 @@ async function testAccount(accountId: string): Promise<{ success: boolean; messa
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
         "Referer": "https://grok.x.ai/",
-        "Origin": "https://grok.x.ai"
+        "Origin": "https://grok.x.ai",
+        "Sec-Ch-Ua": `"Chromium";v="138", "Microsoft Edge";v="138", "Not=A?Brand";v="99"`,
+        "Sec-Ch-Ua-Platform": `"Windows"`
       },
-      redirect: "manual",
+      redirect: "follow", // 跟随重定向
     });
 
     const responseText = await response.text();
-    console.log(`Test account ${accountId}: HTTP ${response.status}, User-Agent: ${account.userAgent}, Cookies: ${account.cookies.substring(0, 50)}..., Response: ${responseText.substring(0, 100)}...`);
+    const location = response.headers.get("Location") || "";
+    console.log(`Test account ${accountId}: HTTP ${response.status}, Location: ${location}, User-Agent: ${account.userAgent}, Cookies: ${account.cookies.substring(0, 50)}..., Response: ${responseText.substring(0, 100)}...`);
 
-    if (response.status === 200 || response.status === 302) {
-      return { success: true, message: "Connection test successful" };
+    // 检查是否为 Cloudflare 验证页面
+    if (responseText.includes("challenge-form") || responseText.includes("<title>Please wait...</title>")) {
+      return {
+        success: false,
+        message: "Cloudflare verification required, please update cookies manually",
+        location
+      };
+    }
+
+    if (response.status === 200) {
+      return { success: true, message: "Connection test successful", location };
     } else if (response.status === 401 || response.status === 403) {
-      return { success: false, message: `Authentication failed - cookies may be invalid (HTTP ${response.status})` };
+      return { success: false, message: `Authentication failed - cookies may be invalid (HTTP ${response.status})`, location };
     } else {
-      return { success: false, message: `HTTP ${response.status}: ${responseText.substring(0, 200)}` };
+      return { success: false, message: `HTTP ${response.status}: ${responseText.substring(0, 200)}`, location };
     }
   } catch (error) {
     console.error(`Test account ${accountId} failed:`, error);
@@ -99,6 +115,60 @@ async function testAccount(accountId: string): Promise<{ success: boolean; messa
       success: false, 
       message: `Connection failed: ${error.message}` 
     };
+  }
+}
+
+// 调试路由，返回详细响应信息
+async function debugAccount(accountId: string): Promise<Response> {
+  try {
+    const account = ACCOUNTS[accountId];
+    if (!account || !account.cookies) {
+      return new Response(
+        JSON.stringify({ error: `Account ${accountId} not configured or missing cookies` }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const testUrl = "https://grok.x.ai/";
+    const response = await fetch(testUrl, {
+      method: "GET",
+      headers: {
+        "Cookie": account.cookies,
+        "User-Agent": account.userAgent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://grok.x.ai/",
+        "Origin": "https://grok.x.ai",
+        "Sec-Ch-Ua": `"Chromium";v="138", "Microsoft Edge";v="138", "Not=A?Brand";v="99"`,
+        "Sec-Ch-Ua-Platform": `"Windows"`
+      },
+      redirect: "follow",
+    });
+
+    const responseText = await response.text();
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+
+    return new Response(
+      JSON.stringify({
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+        body: responseText.substring(0, 1000),
+        cloudflareVerification: responseText.includes("challenge-form") || responseText.includes("<title>Please wait...</title>")
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  } catch (error) {
+    return new Response(
+      JSON.stringify({ error: "Debug failed", details: error.message }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   }
 }
 
@@ -141,7 +211,9 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
       "Sec-Fetch-Site": request.headers.get("Sec-Fetch-Site") || "none",
       "Sec-Fetch-User": "?1",
       "Referer": "https://grok.x.ai/",
-      "Origin": "https://grok.x.ai"
+      "Origin": "https://grok.x.ai",
+      "Sec-Ch-Ua": `"Chromium";v="138", "Microsoft Edge";v="138", "Not=A?Brand";v="99"`,
+      "Sec-Ch-Ua-Platform": `"Windows"`
     };
 
     let body: string | undefined;
@@ -156,14 +228,7 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
       const { socket, response } = Deno.upgradeWebSocket(request);
       const wsUrl = grokUrl.replace(/^https/, "wss");
       
-      const ws = new WebSocket(wsUrl, {
-        headers: {
-          "Cookie": account.cookies,
-          "User-Agent": account.userAgent,
-          "Origin": "https://grok.x.ai"
-        }
-      });
-
+      const ws = new WebSocket(wsUrl);
       ws.onopen = () => {
         console.log(`WebSocket connected for ${accountId} to ${wsUrl}`);
       };
@@ -193,9 +258,25 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
 
     let responseBody = await response.arrayBuffer();
     const contentType = response.headers.get("Content-Type") || "";
+    const responseText = contentType.includes("text/html") ? new TextDecoder().decode(responseBody) : "";
+
+    // 检查 Cloudflare 验证页面
+    if (responseText.includes("challenge-form") || responseText.includes("<title>Please wait...</title>")) {
+      return new Response(
+        JSON.stringify({
+          error: "Cloudflare verification required",
+          details: "Please update ACCOUNT1_COOKIES with fresh cookies from grok.x.ai",
+          timestamp: new Date().toISOString()
+        }),
+        { 
+          status: 403, 
+          headers: { ...corsHeaders, "Content-Type": "application/json" } 
+        }
+      );
+    }
 
     if (contentType.includes("text/html")) {
-      let htmlContent = new TextDecoder().decode(responseBody);
+      let htmlContent = responseText;
       const currentHost = new URL(request.url).origin;
       
       // 增强路径重写，处理相对路径、绝对路径和 Cloudflare 资源
@@ -208,7 +289,8 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
         .replace(/url\('\/([^']+)'\)/g, `url('${currentHost}/proxy?account=${accountId}&path=/$1')`)
         .replace(/href="https:\/\/grok\.x\.ai\/([^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/$1"`)
         .replace(/src="https:\/\/grok\.x\.ai\/([^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/$1"`)
-        .replace(/cdn-cgi/g, `${currentHost}/proxy?account=${accountId}&path=/cdn-cgi`) // 处理 Cloudflare 资源
+        .replace(/wss:\/\/grok\.x\.ai\/([^"]*?)"/g, `wss://${currentHost}/proxy?account=${accountId}&path=/$1"`)
+        .replace(/cdn-cgi/g, `${currentHost}/proxy?account=${accountId}&path=/cdn-cgi`)
         .replace(
           "<head>",
           `<head>
@@ -351,6 +433,9 @@ async function handler(request: Request): Promise<Response> {
           }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
+
+      case "/debug/account1":
+        return await debugAccount("account1");
 
       default:
         const testMatch = apiPath.match(/^\/test\/(.+)$/);
