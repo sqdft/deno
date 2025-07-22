@@ -6,19 +6,33 @@ interface AccountConfig {
   userAgent?: string;
 }
 
-// 账号配置 - 部署时通过环境变量设置
+// 验证 cookies 格式
+function validateCookies(cookies: string): string {
+  const cleanedCookies = cookies
+    .replace(/\n/g, '') // 移除换行符
+    .replace(/\r/g, '') // 移除回车符
+    .replace(/PORT=8000/g, '') // 移除误包含的环境变量
+    .trim(); // 移除首尾空格
+  if (!cleanedCookies.match(/^[^;]+(;\s*[^;]+)*$/)) {
+    throw new Error("Invalid cookies format");
+  }
+  return cleanedCookies;
+}
+
+// 账号配置 - 仅保留 account1
 const ACCOUNTS: Record<string, AccountConfig> = {
   account1: {
-    cookies: Deno.env.get("ACCOUNT1_COOKIES") || "",
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-  },
-  account2: {
-    cookies: Deno.env.get("ACCOUNT2_COOKIES") || "",
-    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-  },
-  account3: {
-    cookies: Deno.env.get("ACCOUNT3_COOKIES") || "",
-    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    cookies: (() => {
+      try {
+        return validateCookies(
+          Deno.env.get("ACCOUNT1_COOKIES") || ""
+        );
+      } catch (error) {
+        console.error("Invalid cookies for account1:", error.message);
+        return "";
+      }
+    })(),
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0"
   }
 };
 
@@ -54,27 +68,33 @@ async function testAccount(accountId: string): Promise<{ success: boolean; messa
     const testUrl = "https://grok.x.ai/";
     
     const response = await fetch(testUrl, {
-      method: "HEAD",
+      method: "GET",
       headers: {
         "Cookie": account.cookies,
-        "User-Agent": account.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": account.userAgent,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
         "DNT": "1",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://grok.x.ai/",
+        "Origin": "https://grok.x.ai"
       },
       redirect: "manual",
     });
 
+    const responseText = await response.text();
+    console.log(`Test account ${accountId}: HTTP ${response.status}, User-Agent: ${account.userAgent}, Cookies: ${account.cookies.substring(0, 50)}..., Response: ${responseText.substring(0, 100)}...`);
+
     if (response.status === 200 || response.status === 302) {
       return { success: true, message: "Connection test successful" };
     } else if (response.status === 401 || response.status === 403) {
-      return { success: false, message: "Authentication failed - cookies may be invalid" };
+      return { success: false, message: `Authentication failed - cookies may be invalid (HTTP ${response.status})` };
     } else {
-      return { success: false, message: `HTTP ${response.status}` };
+      return { success: false, message: `HTTP ${response.status}: ${responseText.substring(0, 200)}` };
     }
   } catch (error) {
+    console.error(`Test account ${accountId} failed:`, error);
     return { 
       success: false, 
       message: `Connection failed: ${error.message}` 
@@ -99,68 +119,96 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
     const url = new URL(request.url);
     let targetPath = url.searchParams.get("path") || "/";
     
-    // 确保路径以 / 开头
     if (!targetPath.startsWith("/")) {
       targetPath = "/" + targetPath;
     }
     
     const grokUrl = `https://grok.x.ai${targetPath}`;
 
-    console.log(`Proxying request to: ${grokUrl} for account: ${accountId}`);
+    console.log(`Proxying request to: ${grokUrl} for account: ${accountId}, User-Agent: ${account.userAgent}`);
 
-    // 构建请求头
     const headers: HeadersInit = {
       "Cookie": account.cookies,
-      "User-Agent": account.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      "User-Agent": account.userAgent,
       "Accept": request.headers.get("Accept") || "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.5",
+      "Accept-Language": request.headers.get("Accept-Language") || "en-US,en;q=0.5",
       "Accept-Encoding": "gzip, deflate, br",
       "DNT": "1",
       "Connection": "keep-alive",
       "Upgrade-Insecure-Requests": "1",
-      "Sec-Fetch-Dest": "document",
-      "Sec-Fetch-Mode": "navigate",
-      "Sec-Fetch-Site": "none",
-      "Cache-Control": "max-age=0",
+      "Sec-Fetch-Dest": request.headers.get("Sec-Fetch-Dest") || "document",
+      "Sec-Fetch-Mode": request.headers.get("Sec-Fetch-Mode") || "navigate",
+      "Sec-Fetch-Site": request.headers.get("Sec-Fetch-Site") || "none",
+      "Sec-Fetch-User": "?1",
+      "Referer": "https://grok.x.ai/",
+      "Origin": "https://grok.x.ai"
     };
 
-    // 如果是POST请求，复制请求体和相关头部
-    let body = undefined;
-    if (request.method === "POST") {
+    let body: string | undefined;
+    if (["POST", "PUT", "PATCH"].includes(request.method)) {
       body = await request.text();
       headers["Content-Type"] = request.headers.get("Content-Type") || "application/json";
       headers["Content-Length"] = body.length.toString();
+    }
+
+    // 处理 WebSocket 请求
+    if (request.headers.get("upgrade") === "websocket") {
+      const { socket, response } = Deno.upgradeWebSocket(request);
+      const wsUrl = grokUrl.replace(/^https/, "wss");
+      
+      const ws = new WebSocket(wsUrl, {
+        headers: {
+          "Cookie": account.cookies,
+          "User-Agent": account.userAgent,
+          "Origin": "https://grok.x.ai"
+        }
+      });
+
+      ws.onopen = () => {
+        console.log(`WebSocket connected for ${accountId} to ${wsUrl}`);
+      };
+      ws.onmessage = (event) => socket.send(event.data);
+      ws.onerror = (error) => {
+        console.error(`WebSocket error for ${accountId}:`, error);
+        socket.close();
+      };
+      ws.onclose = () => socket.close();
+
+      socket.onmessage = (event) => ws.send(event.data);
+      socket.onerror = (error) => {
+        console.error(`Client WebSocket error for ${accountId}:`, error);
+        ws.close();
+      };
+      socket.onclose = () => ws.close();
+
+      return response;
     }
 
     const response = await fetch(grokUrl, {
       method: request.method,
       headers,
       body,
-      redirect: "follow", // 自动处理重定向
+      redirect: "follow",
     });
 
-    // 获取响应内容
     let responseBody = await response.arrayBuffer();
     const contentType = response.headers.get("Content-Type") || "";
 
-    // 如果是HTML内容，需要修改其中的链接
     if (contentType.includes("text/html")) {
       let htmlContent = new TextDecoder().decode(responseBody);
-      
-      // 获取当前主机名
       const currentHost = new URL(request.url).origin;
       
-      // 替换页面中的链接，让它们通过代理
+      // 增强路径重写，处理相对路径、绝对路径和 Cloudflare 资源
       htmlContent = htmlContent
-        // 替换相对路径的链接
         .replace(/href="\/([^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/$1"`)
         .replace(/src="\/([^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/$1"`)
         .replace(/action="\/([^"]*?)"/g, `action="${currentHost}/proxy?account=${accountId}&path=/$1"`)
-        // 替换CSS中的相对路径
         .replace(/url\(\/([^)]+)\)/g, `url(${currentHost}/proxy?account=${accountId}&path=/$1)`)
         .replace(/url\("\/([^"]+)"\)/g, `url("${currentHost}/proxy?account=${accountId}&path=/$1")`)
         .replace(/url\('\/([^']+)'\)/g, `url('${currentHost}/proxy?account=${accountId}&path=/$1')`)
-        // 添加账号标识
+        .replace(/href="https:\/\/grok\.x\.ai\/([^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/$1"`)
+        .replace(/src="https:\/\/grok\.x\.ai\/([^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/$1"`)
+        .replace(/cdn-cgi/g, `${currentHost}/proxy?account=${accountId}&path=/cdn-cgi`) // 处理 Cloudflare 资源
         .replace(
           "<head>",
           `<head>
@@ -186,10 +234,7 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
       responseBody = new TextEncoder().encode(htmlContent).buffer;
     }
 
-    // 构建响应头
     const responseHeaders = new Headers(corsHeaders);
-    
-    // 复制重要的响应头
     const headersToKeep = [
       "Content-Type", "Cache-Control", "Expires", 
       "Last-Modified", "ETag", "Content-Encoding"
@@ -202,7 +247,6 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
       }
     });
 
-    // 设置正确的 Content-Length
     responseHeaders.set("Content-Length", responseBody.byteLength.toString());
 
     return new Response(responseBody, {
@@ -210,7 +254,6 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
       statusText: response.statusText,
       headers: responseHeaders,
     });
-
   } catch (error) {
     console.error("Proxy error:", error);
     return new Response(
@@ -230,23 +273,18 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
 // 静态文件服务
 async function serveStaticFile(pathname: string): Promise<Response> {
   try {
-    // 默认服务 index.html
     if (pathname === "/" || pathname === "") {
       pathname = "/index.html";
     }
     
-    // 安全检查：防止目录遍历
     if (pathname.includes("..")) {
       return new Response("Forbidden", { status: 403 });
     }
     
-    // 尝试从 public 目录读取文件
     const filePath = `./public${pathname}`;
     
     try {
       const fileContent = await Deno.readFile(filePath);
-      
-      // 确定内容类型
       let contentType = "text/plain";
       if (pathname.endsWith(".html")) contentType = "text/html";
       else if (pathname.endsWith(".css")) contentType = "text/css";
@@ -280,7 +318,6 @@ async function serveStaticFile(pathname: string): Promise<Response> {
 
 // 主请求处理器
 async function handler(request: Request): Promise<Response> {
-  // 处理CORS
   const corsResponse = handleCORS(request);
   if (corsResponse) return corsResponse;
 
@@ -289,13 +326,11 @@ async function handler(request: Request): Promise<Response> {
 
   console.log(`${request.method} ${pathname}`);
 
-  // API路由
   if (pathname.startsWith("/api/")) {
     const apiPath = pathname.replace("/api", "");
     
     switch (apiPath) {
       case "/accounts":
-        // 返回可用账号列表
         const availableAccounts = Object.keys(ACCOUNTS).filter(
           key => ACCOUNTS[key].cookies
         );
@@ -318,7 +353,6 @@ async function handler(request: Request): Promise<Response> {
         );
 
       default:
-        // 检查是否是测试账号的请求
         const testMatch = apiPath.match(/^\/test\/(.+)$/);
         if (testMatch) {
           const accountId = testMatch[1];
@@ -336,23 +370,19 @@ async function handler(request: Request): Promise<Response> {
     }
   }
 
-  // 代理路由
   if (pathname === "/proxy") {
     const accountId = url.searchParams.get("account") || "account1";
     return await proxyGrokRequest(request, accountId);
   }
 
-  // 直接账号访问路由
-  if (pathname.startsWith("/account")) {
-    const accountId = pathname.substring(1); // 移除开头的 '/'
+  if (pathname.startsWith("/account/")) {
+    const accountId = pathname.substring("/account/".length);
     if (ACCOUNTS[accountId]) {
-      // 重定向到Grok主页，通过代理
       const grokMainUrl = `/proxy?account=${accountId}&path=/`;
       return Response.redirect(new URL(grokMainUrl, request.url).href, 302);
     }
   }
 
-  // 静态文件服务
   return await serveStaticFile(pathname);
 }
 
