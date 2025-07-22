@@ -1,4 +1,4 @@
-// main.ts - Deno Grok代理服务 (修复版)
+// main.ts - Deno Grok代理服务 (优化版)
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
 
 interface AccountConfig {
@@ -25,7 +25,7 @@ function validateCookies(cookies: string): string {
   return cleanedCookies;
 }
 
-// 账号配置 - 仅保留 account1，依赖环境变量
+// 账号配置 - 仅 account1，依赖环境变量
 const ACCOUNTS: Record<string, AccountConfig> = {
   account1: {
     cookies: (() => {
@@ -69,7 +69,7 @@ async function testAccount(accountId: string): Promise<{ success: boolean; messa
       };
     }
 
-    const testUrl = "https://grok.x.ai/";
+    const testUrl = "https://grok.x.ai/grok";
     
     const response = await fetch(testUrl, {
       method: "GET",
@@ -86,18 +86,21 @@ async function testAccount(accountId: string): Promise<{ success: boolean; messa
         "Sec-Ch-Ua": `"Chromium";v="138", "Microsoft Edge";v="138", "Not=A?Brand";v="99"`,
         "Sec-Ch-Ua-Platform": `"Windows"`
       },
-      redirect: "follow", // 跟随重定向
+      redirect: "follow",
     });
 
     const responseText = await response.text();
     const location = response.headers.get("Location") || "";
     console.log(`Test account ${accountId}: HTTP ${response.status}, Location: ${location}, User-Agent: ${account.userAgent}, Cookies: ${account.cookies.substring(0, 50)}..., Response: ${responseText.substring(0, 100)}...`);
 
-    // 检查是否为 Cloudflare 验证页面
-    if (responseText.includes("challenge-form") || responseText.includes("<title>Please wait...</title>")) {
+    // 检查 Cloudflare 验证页面
+    if (responseText.includes("challenge-form") || 
+        responseText.includes("<title>Please wait...</title>") || 
+        responseText.includes("<title>403 Forbidden</title>") || 
+        responseText.includes("<title>Access denied</title>")) {
       return {
         success: false,
-        message: "Cloudflare verification required, please update cookies manually",
+        message: "Cloudflare verification required, please update cookies manually at https://grok.x.ai",
         location
       };
     }
@@ -129,7 +132,7 @@ async function debugAccount(accountId: string): Promise<Response> {
       );
     }
 
-    const testUrl = "https://grok.x.ai/";
+    const testUrl = "https://grok.x.ai/grok";
     const response = await fetch(testUrl, {
       method: "GET",
       headers: {
@@ -160,7 +163,10 @@ async function debugAccount(accountId: string): Promise<Response> {
         statusText: response.statusText,
         headers,
         body: responseText.substring(0, 1000),
-        cloudflareVerification: responseText.includes("challenge-form") || responseText.includes("<title>Please wait...</title>")
+        cloudflareVerification: responseText.includes("challenge-form") || 
+                                responseText.includes("<title>Please wait...</title>") || 
+                                responseText.includes("<title>403 Forbidden</title>") || 
+                                responseText.includes("<title>Access denied</title>")
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
@@ -187,7 +193,7 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
     }
 
     const url = new URL(request.url);
-    let targetPath = url.searchParams.get("path") || "/";
+    let targetPath = url.searchParams.get("path") || "/grok";
     
     if (!targetPath.startsWith("/")) {
       targetPath = "/" + targetPath;
@@ -261,11 +267,15 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
     const responseText = contentType.includes("text/html") ? new TextDecoder().decode(responseBody) : "";
 
     // 检查 Cloudflare 验证页面
-    if (responseText.includes("challenge-form") || responseText.includes("<title>Please wait...</title>")) {
+    if (responseText.includes("challenge-form") || 
+        responseText.includes("<title>Please wait...</title>") || 
+        responseText.includes("<title>403 Forbidden</title>") || 
+        responseText.includes("<title>Access denied</title>")) {
+      console.log(`Cloudflare verification detected for ${grokUrl}: HTTP ${response.status}, Response: ${responseText.substring(0, 200)}`);
       return new Response(
         JSON.stringify({
           error: "Cloudflare verification required",
-          details: "Please update ACCOUNT1_COOKIES with fresh cookies from grok.x.ai",
+          details: "Please update ACCOUNT1_COOKIES with fresh cookies from https://grok.x.ai",
           timestamp: new Date().toISOString()
         }),
         { 
@@ -279,18 +289,31 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
       let htmlContent = responseText;
       const currentHost = new URL(request.url).origin;
       
-      // 增强路径重写，处理相对路径、绝对路径和 Cloudflare 资源
+      // 增强路径重写，处理 Next.js 和静态资源
       htmlContent = htmlContent
-        .replace(/href="\/([^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/$1"`)
-        .replace(/src="\/([^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/$1"`)
+        .replace(/href="\/(_next\/[^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/_next/$1"`)
+        .replace(/src="\/(_next\/[^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/_next/$1"`)
+        .replace(/href="\/(images\/[^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/images/$1"`)
+        .replace(/src="\/(images\/[^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/images/$1"`)
+        .replace(/href="\/(cdn-cgi\/[^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/cdn-cgi/$1"`)
+        .replace(/src="\/(cdn-cgi\/[^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/cdn-cgi/$1"`)
         .replace(/action="\/([^"]*?)"/g, `action="${currentHost}/proxy?account=${accountId}&path=/$1"`)
-        .replace(/url\(\/([^)]+)\)/g, `url(${currentHost}/proxy?account=${accountId}&path=/$1)`)
-        .replace(/url\("\/([^"]+)"\)/g, `url("${currentHost}/proxy?account=${accountId}&path=/$1")`)
-        .replace(/url\('\/([^']+)'\)/g, `url('${currentHost}/proxy?account=${accountId}&path=/$1')`)
-        .replace(/href="https:\/\/grok\.x\.ai\/([^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/$1"`)
-        .replace(/src="https:\/\/grok\.x\.ai\/([^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/$1"`)
+        .replace(/url\(\/(_next\/[^)]+)\)/g, `url(${currentHost}/proxy?account=${accountId}&path=/_next/$1)`)
+        .replace(/url\(\/(images\/[^)]+)\)/g, `url(${currentHost}/proxy?account=${accountId}&path=/images/$1)`)
+        .replace(/url\(\/(cdn-cgi\/[^)]+)\)/g, `url(${currentHost}/proxy?account=${accountId}&path=/cdn-cgi/$1)`)
+        .replace(/url\("\/(_next\/[^"]+)"\)/g, `url("${currentHost}/proxy?account=${accountId}&path=/_next/$1")`)
+        .replace(/url\("\/(images\/[^"]+)"\)/g, `url("${currentHost}/proxy?account=${accountId}&path=/images/$1")`)
+        .replace(/url\("\/(cdn-cgi\/[^"]+)"\)/g, `url("${currentHost}/proxy?account=${accountId}&path=/cdn-cgi/$1")`)
+        .replace(/url\('\/(_next\/[^']+)'\)/g, `url('${currentHost}/proxy?account=${accountId}&path=/_next/$1')`)
+        .replace(/url\('\/(images\/[^']+)'\)/g, `url('${currentHost}/proxy?account=${accountId}&path=/images/$1')`)
+        .replace(/url\('\/(cdn-cgi\/[^']+)'\)/g, `url('${currentHost}/proxy?account=${accountId}&path=/cdn-cgi/$1')`)
+        .replace(/href="https:\/\/grok\.x\.ai\/(_next\/[^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/_next/$1"`)
+        .replace(/src="https:\/\/grok\.x\.ai\/(_next\/[^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/_next/$1"`)
+        .replace(/href="https:\/\/grok\.x\.ai\/(images\/[^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/images/$1"`)
+        .replace(/src="https:\/\/grok\.x\.ai\/(images\/[^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/images/$1"`)
+        .replace(/href="https:\/\/grok\.x\.ai\/(cdn-cgi\/[^"]*?)"/g, `href="${currentHost}/proxy?account=${accountId}&path=/cdn-cgi/$1"`)
+        .replace(/src="https:\/\/grok\.x\.ai\/(cdn-cgi\/[^"]*?)"/g, `src="${currentHost}/proxy?account=${accountId}&path=/cdn-cgi/$1"`)
         .replace(/wss:\/\/grok\.x\.ai\/([^"]*?)"/g, `wss://${currentHost}/proxy?account=${accountId}&path=/$1"`)
-        .replace(/cdn-cgi/g, `${currentHost}/proxy?account=${accountId}&path=/cdn-cgi`)
         .replace(
           "<head>",
           `<head>
@@ -330,6 +353,8 @@ async function proxyGrokRequest(request: Request, accountId: string): Promise<Re
     });
 
     responseHeaders.set("Content-Length", responseBody.byteLength.toString());
+
+    console.log(`Proxy response for ${grokUrl}: HTTP ${response.status}, Content-Type: ${contentType}`);
 
     return new Response(responseBody, {
       status: response.status,
@@ -463,7 +488,7 @@ async function handler(request: Request): Promise<Response> {
   if (pathname.startsWith("/account/")) {
     const accountId = pathname.substring("/account/".length);
     if (ACCOUNTS[accountId]) {
-      const grokMainUrl = `/proxy?account=${accountId}&path=/`;
+      const grokMainUrl = `/proxy?account=${accountId}&path=/grok`;
       return Response.redirect(new URL(grokMainUrl, request.url).href, 302);
     }
   }

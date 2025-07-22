@@ -122,12 +122,12 @@ deno run --allow-net --allow-read --allow-env main.ts
                 const testResponse = await fetch(`/api/test/${account}`);
                 const testData = await testResponse.json();
                 if (!testData.success) {
-                    alert(`账号 ${account} 测试失败: ${testData.message}`);
+                    alert(`账号 ${account} 测试失败: ${testData.message}${testData.location ? `\n重定向到: ${testData.location}` : ''}`);
                     return;
                 }
 
                 // 重定向到代理路由
-                window.location.href = `/proxy?account=${account}&path=/`;
+                window.location.href = `/proxy?account=${account}&path=/grok`;
             } catch (error) {
                 alert(`访问账号失败: ${error.message}`);
             } finally {
